@@ -110,12 +110,15 @@ def normalize(update: dict, *, utf16: bool = False) -> Message | None:
     message = update.get("message") or {}
     body = message.get("body") or {}
     chat = (message.get("recipient") or {}).get("chat_id")
-    if chat is None or not body.get("mid"):
-        return None
     sender = _author(message.get("sender") or {})
-    rich, media = _rich(body, utf16), _attachments(body)
     link = message.get("link") or {}
     linked = link.get("message") or {}
+    mid = body.get("mid") or message.get("mid")
+    if not mid and link.get("type") == "forward" and linked.get("mid") and timestamp != "0":
+        mid = f"forward:{timestamp}:{sender.id}:{linked['mid']}"
+    if chat is None or not mid:
+        return None
+    rich, media = _rich(body, utf16), _attachments(body)
     reference = None
     forward = None
     if link.get("type") == "reply":
@@ -126,7 +129,7 @@ def normalize(update: dict, *, utf16: bool = False) -> Message | None:
             rich += (RichText("\n") if rich.text else RichText()) + _rich(linked, utf16)
         media += _attachments(linked)
     event = Event.EDIT if kind == "message_edited" else Event.CREATE
-    return Message(Platform.MAX, chat, str(body["mid"]), sender, rich, media, event,
+    return Message(Platform.MAX, chat, str(mid), sender, rich, media, event,
                    timestamp if event == Event.EDIT else "", reference, forward)
 
 
@@ -237,7 +240,7 @@ class MaxAdapter:
     async def identify(self) -> None:
         profile = await self._call("GET", "/me")
         self.bot_id = profile["user_id"]
-        self.username = profile.get("username", "")
+        self.username = profile.get("username") or ""
 
     async def check_chat(self, chat: int) -> None:
         info = await self._call("GET", f"/chats/{chat}")
@@ -434,6 +437,10 @@ class MaxAdapter:
 
     def plan(self, content: RichText, media: Sequence[dict]) -> list[Part]:
         chunks = split_text(content, 4000, _max_size)
+        if media and _max_size(chunks[0]) > 3800:
+            first = split_text(content, 3800, _max_size)[0]
+            rest = content.slice(len(first.text), len(content.text))
+            chunks = [first, *split_text(rest, 4000, _max_size)]
         groups = []
         for visual, group in groupby(media, key=lambda item: item["type"] in {"image", "video"}):
             items = list(group)

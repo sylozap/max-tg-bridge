@@ -38,6 +38,19 @@ def identity(message: Message) -> tuple[str, int, str, str, str]:
     return message.platform, message.chat, message.id, message.event, message.revision
 
 
+
+@dataclass(frozen=True, slots=True)
+class Original:
+    mid: str
+    root: str
+    media_key: str | None
+    has_caption: bool
+
+
+def media_key(message: Message) -> str | None:
+    return message.attachments[0].key if len(message.attachments) == 1 else None
+
+
 class Store:
     def __init__(self, connection: aiosqlite.Connection):
         self.db = connection
@@ -58,7 +71,15 @@ class Store:
             if version == 0:
                 schema = files("app.storage").joinpath("schema.sql").read_text(encoding="utf-8")
                 await db.executescript("BEGIN IMMEDIATE;\n" + schema + "\nCOMMIT;")
-            elif version != 1:
+            elif version == 1:
+                await db.executescript("""
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE originals ADD COLUMN media_key TEXT;
+                    ALTER TABLE originals ADD COLUMN has_caption INTEGER NOT NULL DEFAULT 1;
+                    PRAGMA user_version = 2;
+                    COMMIT;
+                """)
+            elif version != 2:
                 raise RuntimeError("Unsupported SQLite schema version")
             yield cls(db)
 
@@ -163,7 +184,7 @@ class Store:
             await db.execute("INSERT OR IGNORE INTO outgoing VALUES (?, ?, ?)", (platform, chat, mid))
 
     async def record_copy(
-        self, pair: Pair, source: Platform, root: str, originals: Iterable[str], copy: Copy,
+        self, pair: Pair, source: Platform, root: str, originals: Iterable[Message], copy: Copy,
     ) -> None:
         async with self._write() as db:
             await db.execute("INSERT OR IGNORE INTO outgoing VALUES (?, ?, ?)",
@@ -173,8 +194,10 @@ class Store:
                 if not await cur.fetchone():
                     return
             await db.executemany(
-                "INSERT OR IGNORE INTO originals VALUES (?, ?, ?, ?, ?)",
-                ((pair.id, source, mid, root, index) for index, mid in enumerate(originals)),
+                "INSERT OR IGNORE INTO originals(pair, source, mid, root, position, media_key, has_caption) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ((pair.id, source, message.id, root, index, media_key(message), bool(message.content.text))
+                 for index, message in enumerate(originals)),
             )
             await db.execute(
                 """INSERT INTO copies VALUES (?, ?, ?, ?, ?, ?)
@@ -193,6 +216,24 @@ class Store:
         async with self._write() as db:
             await db.execute("DELETE FROM copies WHERE pair=? AND source=? AND root=? AND part=?",
                              (pair.id, source, root, part))
+
+    async def original(self, pair: Pair, source: Platform, mid: str) -> Original | None:
+        row = await self._one(
+            "SELECT mid, root, media_key, has_caption FROM originals WHERE pair=? AND source=? AND mid=?",
+            (pair.id, source, mid),
+        )
+        return Original(*row) if row else None
+
+    async def has_other_captions(self, pair: Pair, source: Platform, root: str, mid: str) -> bool:
+        return await self._one(
+            "SELECT 1 FROM originals WHERE pair=? AND source=? AND root=? AND mid!=? AND has_caption=1 LIMIT 1",
+            (pair.id, source, root, mid),
+        ) is not None
+
+    async def update_original(self, pair: Pair, message: Message) -> None:
+        async with self._write() as db:
+            await db.execute("UPDATE originals SET has_caption=?, media_key=? WHERE pair=? AND source=? AND mid=?",
+                             (bool(message.content.text), media_key(message), pair.id, message.platform, message.id))
 
     async def reply_target(self, pair: Pair, source: Platform, mid: str) -> str | None:
         direct = await self._one(

@@ -64,7 +64,7 @@ def _media_name(kind: str) -> str:
 def _attachments(m: TelegramMessage) -> tuple[Attachment, ...]:
     if m.photo:
         photo = m.photo[-1]
-        return (Attachment("image", photo.file_id, "photo.jpg", photo.file_size, mime="image/jpeg"),)
+        return (Attachment("image", photo.file_id, "photo.jpg", photo.file_size, mime="image/jpeg", key=photo.file_unique_id),)
     for kind in ("animation", "video", "video_note", "voice", "audio", "document"):
         media = getattr(m, kind)
         if media:
@@ -72,6 +72,7 @@ def _attachments(m: TelegramMessage) -> tuple[Attachment, ...]:
                 "file" if kind == "document" else kind,
                 media.file_id, getattr(media, "file_name", None) or _media_name(kind),
                 media.file_size, getattr(media, "duration", None), mime=getattr(media, "mime_type", None),
+                key=media.file_unique_id,
             ),)
     if m.sticker:
         sticker = m.sticker
@@ -80,7 +81,7 @@ def _attachments(m: TelegramMessage) -> tuple[Attachment, ...]:
         return (Attachment(
             "sticker_video" if sticker.is_video else "sticker_image", sticker.file_id,
             "sticker.webm" if sticker.is_video else "sticker.webp", sticker.file_size,
-            detail=sticker.emoji,
+            detail=sticker.emoji, key=sticker.file_unique_id,
         ),)
     if m.venue or m.location:
         point = m.venue.location if m.venue else m.location

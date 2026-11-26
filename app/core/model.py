@@ -75,6 +75,7 @@ class Attachment:
     coordinates: tuple[float, float] | None = None
     phone: str | None = field(default=None, repr=False)
     mime: str | None = None
+    key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

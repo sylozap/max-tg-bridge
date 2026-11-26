@@ -2,13 +2,17 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from app.config import Settings
 from app.formatting.text import neutralize_mentions
-from app.storage.sqlite import Copy, Pair, Store
+from app.storage.sqlite import Copy, Pair, Store, media_key
 
-from .model import Event, Message, Platform, RichText, Span
+from .media import prepare
+from .model import Event, Message, Part, Platform, RichText, Span
 from .port import Adapter, DeliveryError
 from .retry import retry
 
@@ -44,6 +48,7 @@ class Bridge:
         self.adapters = adapters
         self.command: Handler | None = None
         self.poll_errors: dict[Platform, str] = {}
+        self.media_slots = asyncio.Semaphore(4)
         self.lanes: dict[tuple[int, Platform], _Lane] = {}
 
     def queue_size(self, pair_id: int, source: Platform) -> int:
@@ -140,7 +145,7 @@ class Bridge:
         first = messages[0]
         fields = {"pair_id": pair.id, "platform": first.platform, "event": first.event}
         try:
-            delivered = await self._deliver(pair, messages)
+            delivered, warning = await self._deliver(pair, messages)
         except sqlite3.Error:
             raise
         except DeliveryError as exc:
@@ -150,9 +155,9 @@ class Bridge:
             log.error("unexpected_delivery_error", extra={**fields, "error_type": type(exc).__name__})
             await self.store.finish(messages, pair.id, error="unexpected_delivery_error")
         else:
-            await self.store.finish(messages, pair.id, delivered=delivered)
+            await self.store.finish(messages, pair.id, delivered=delivered, warning=warning)
             if delivered:
-                log.info("delivery_completed", extra={**fields, "message_count": len(messages)})
+                log.info("delivery_completed", extra={**fields, "message_count": len(messages), "code": warning})
 
     def _content(self, messages: list[Message], reply: str | None) -> RichText:
         first = messages[0]
@@ -169,49 +174,133 @@ class Bridge:
         for message in messages:
             if message.content.text:
                 result += RichText("\n") + message.content
-        return neutralize_mentions(result)
+        return result
 
-    async def _deliver(self, pair: Pair, messages: list[Message]) -> bool:
+    async def _deliver(self, pair: Pair, messages: list[Message]) -> tuple[bool, str | None]:
         first = messages[0]
         source = first.platform
-        root = _root(first)
-        adapter = self.adapters[source.opposite]
-        chat = pair.chat(adapter.platform)
+        default_root = _root(first)
+        if first.album and first.event == Event.CREATE:
+            groups: dict[str, list[Message]] = {}
+            new = []
+            for message in messages:
+                original = await self.store.original(pair, source, message.id)
+                if original:
+                    groups.setdefault(original.root, []).append(message)
+                else:
+                    new.append(message)
+            if new:
+                has_album = await self.store.copies(pair, source, default_root)
+                root = f"late-album:{first.album}:{new[0].id}" if has_album else default_root
+                groups[root] = new
+            delivered, warning = False, None
+            for root, group in groups.items():
+                result, code = await self._mirror(pair, group, root)
+                delivered, warning = delivered or result, warning or code
+            return delivered, warning
+        original = await self.store.original(pair, source, first.id) if first.event == Event.EDIT else None
+        return await self._mirror(pair, messages, original.root if original else default_root)
+
+    async def _mirror(self, pair: Pair, messages: list[Message], root: str) -> tuple[bool, str | None]:
+        first = messages[0]
+        source = first.platform
+        target = self.adapters[source.opposite]
+        chat = pair.chat(target.platform)
         existing = {copy.part: copy for copy in await self.store.copies(pair, source, root)}
         if first.event == Event.DELETE:
-            return await self._delete(pair, source, root, adapter, chat, existing)
-        if first.event == Event.EDIT and not existing:
-            return False
+            return await self._delete(pair, source, root, target, chat, existing), None
+        editing = first.event == Event.EDIT
+        if editing and not existing:
+            return False, None
         reply = await self.store.reply_target(pair, source, first.reply.id) if first.reply and first.reply.id else None
-        originals = [item.id for item in messages]
-        parts = adapter.plan(self._content(messages, reply), ())
-        pos = 0
-        while pos < len(parts):
-            part = parts[pos]
-            old = existing.get(pos)
-            if old and first.event == Event.EDIT:
-                try:
-                    await retry(lambda: adapter.edit(chat, old.mid, part, old.mode))
-                except DeliveryError as exc:
-                    if not exc.missing:
-                        raise
-                    await self.store.forget_copy(pair, source, root, pos)
-                    old = None
-            if not old:
-                try:
-                    mid = await retry(lambda: adapter.send(chat, part, reply if pos == 0 else None))
-                except DeliveryError as exc:
-                    if not (exc.missing and reply and pos == 0):
-                        raise
-                    reply = None
-                    parts = adapter.plan(self._content(messages, reply), ())
-                    continue
-                await self.store.record_copy(pair, source, root, originals, Copy(pos, mid, part.mode))
-            pos += 1
-        if first.event == Event.EDIT:
-            surplus = {index: copy for index, copy in existing.items() if index >= len(parts)}
-            await self._delete(pair, source, root, adapter, chat, surplus)
-        return True
+        keep_media = False
+        if editing and target.platform == Platform.MAX and first.attachments:
+            original = await self.store.original(pair, source, first.id)
+            has_other_caption = (
+                first.album and await self.store.has_other_captions(pair, source, root, first.id)
+            )
+            keep_media = bool(
+                original and original.media_key and original.media_key == media_key(first) and not has_other_caption
+                and 0 in existing and existing[0].mode == "media"
+                and all(copy.mode != "media" for index, copy in existing.items() if index != 0)
+            )
+        if editing and first.album and not keep_media:
+            note = self._content(messages, reply) + RichText("\n[Изменение в альбоме Telegram]")
+            correction = f"edit:{first.id}:{first.revision}"
+            copies = {copy.part: copy for copy in await self.store.copies(pair, source, correction)}
+            for pos, part in enumerate(target.plan(neutralize_mentions(note), ())):
+                if pos not in copies:
+                    parent = next(iter(existing.values())).mid if pos == 0 else None
+                    try:
+                        mid = await retry(lambda: target.send(chat, part, parent))
+                    except DeliveryError as exc:
+                        if not (exc.missing and parent):
+                            raise
+                        mid = await retry(lambda: target.send(chat, part, None))
+                    await self.store.record_copy(pair, source, correction, (), Copy(pos, mid, part.mode))
+            return True, "album_edit_notice"
+
+        async with AsyncExitStack() as stack:
+            media, notes, degraded = [], RichText(), False
+            if not keep_media and any(message.attachments for message in messages):
+                await stack.enter_async_context(self.media_slots)
+                folder = Path(stack.enter_context(TemporaryDirectory(prefix="max-tg-bridge-")))
+                media, notes, degraded = await prepare(messages, self.adapters[source], target, folder)
+
+            def plan(reply_to: str | None) -> list[Part]:
+                content = neutralize_mentions(self._content(messages, reply_to) + notes)
+                parts = target.plan(content, media)
+                if keep_media:
+                    parts[0] = replace(parts[0], mode=existing[0].mode)
+                return parts
+
+            parts = plan(reply)
+            pos = 0
+            while pos < len(parts):
+                part = parts[pos]
+                old = existing.get(pos)
+                if old and editing:
+                    try:
+                        await retry(lambda: target.edit(chat, old.mid, part, old.mode,
+                                                        replace_media=not (keep_media and pos == 0)))
+                    except DeliveryError as exc:
+                        if exc.code == "edit_requires_replacement":
+                            await retry(lambda: target.delete(chat, old.mid))
+                        elif not exc.missing or (keep_media and pos == 0):
+                            raise
+                        await self.store.forget_copy(pair, source, root, pos)
+                        old = None
+                    else:
+                        if old.mode != part.mode:
+                            await self.store.record_copy(pair, source, root, messages, Copy(pos, old.mid, part.mode))
+                if not old:
+                    try:
+                        mid, mode = await self._send(target, chat, part, reply if pos == 0 else None)
+                    except DeliveryError as exc:
+                        if not (exc.missing and reply and pos == 0):
+                            raise
+                        reply = None
+                        parts = plan(reply)
+                        continue
+                    degraded = degraded or mode != part.mode
+                    await self.store.record_copy(pair, source, root, messages, Copy(pos, mid, mode))
+                pos += 1
+            if editing:
+                surplus = {index: copy for index, copy in existing.items() if index >= len(parts)}
+                await self._delete(pair, source, root, target, chat, surplus)
+                await self.store.update_original(pair, first)
+        return True, "media_fallback" if degraded else None
+
+    @staticmethod
+    async def _send(target: Adapter, chat: int, part: Part, reply: str | None) -> tuple[str, str]:
+        try:
+            return await retry(lambda: target.send(chat, part, reply)), part.mode
+        except DeliveryError as exc:
+            if not part.media or exc.code not in {"media_rejected", "max_attachment_pending"}:
+                raise
+            note = "[Вложение не передано: мессенджер отклонил файл или не завершил его обработку]"
+            fallback, = target.plan(part.content + RichText(("\n" if part.content.text else "") + note), ())
+            return await retry(lambda: target.send(chat, fallback, reply)), fallback.mode
 
     async def _delete(
         self, pair: Pair, source: Platform, root: str, adapter: Adapter, chat: int, existing: dict[int, Copy],

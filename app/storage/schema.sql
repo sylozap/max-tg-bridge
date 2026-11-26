@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS originals (
     mid TEXT NOT NULL,
     root TEXT NOT NULL,
     position INTEGER NOT NULL,
+    media_key TEXT,
+    has_caption INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (pair, source, mid)
 );
 CREATE INDEX IF NOT EXISTS originals_root_idx ON originals(pair, source, root, position);
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
