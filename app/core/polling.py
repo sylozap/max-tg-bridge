@@ -42,6 +42,7 @@ async def poll(adapter: Adapter, bridge: Bridge, stop: asyncio.Event) -> None:
         if batch is None:
             return
         bridge.poll_errors.pop(adapter.platform, None)
+        log.debug("poll_batch_received", extra={"platform": adapter.platform, "message_count": len(batch.messages)})
         await bridge.handle_batch(batch.messages)
         if batch.cursor is not None and batch.cursor != cursor:
             await bridge.store.save_cursor(adapter.platform, adapter.bot_id, batch.cursor)

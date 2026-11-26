@@ -12,6 +12,7 @@ from aiogram.utils.token import TokenValidationError
 
 from .adapters.max import MaxAdapter
 from .adapters.telegram import TelegramAdapter
+from .commands import COMMANDS, Commands
 from .config import Settings
 from .core.bridge import Bridge
 from .core.model import Platform
@@ -51,6 +52,14 @@ async def _run(settings: Settings, stop: asyncio.Event) -> None:
                 if stop.is_set():
                     return
             bridge = Bridge(settings, store, adapters)
+            bridge.command = Commands(bridge)
+            for adapter in adapters.values():
+                try:
+                    await until_stop(lambda: retry(lambda: adapter.register(COMMANDS), attempts=3), stop)
+                except DeliveryError as exc:
+                    log.warning("command_registration_failed", extra={"platform": adapter.platform, "code": exc.code})
+                if stop.is_set():
+                    return
             try:
                 async with asyncio.TaskGroup() as tasks:
                     listeners = [
