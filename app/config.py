@@ -74,9 +74,10 @@ class Settings:
         if (parts.scheme != "https" or parts.netloc not in {"platform-api2.max.ru", "platform-api.max.ru"}
                 or parts.path not in {"", "/"} or parts.query or parts.fragment):
             raise ValueError("Некорректный MAX_API_BASE_URL")
+        default_database = Path(_setting("STATE_DIRECTORY", "data")) / "bridge.db"
         return cls(
             telegram_token, max_token, _ids("TELEGRAM_ADMIN_IDS"), _ids("MAX_ADMIN_IDS"),
-            Path(_setting("DATABASE_PATH", "data/bridge.db")), log_level, _bool("DEBUG", False),
+            Path(_setting("DATABASE_PATH", str(default_database))), log_level, _bool("DEBUG", False),
             template, _bool("IGNORE_OTHER_BOTS", True), _bool("IGNORE_SERVICE_EVENTS", True),
             url.rstrip("/"), _setting("MAX_CA_FILE") or None, _bool("MAX_MARKUP_UTF16", False),
         )

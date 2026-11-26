@@ -1,0 +1,25 @@
+services:
+  bridge:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_PATH: ${DATABASE_PATH:-/data/bridge.db}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - bridge-data:/data
+      - ./certs:/certs:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bridge-data:

@@ -1,0 +1,33 @@
+[Unit]
+Description=MAX and Telegram group bridge
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=max-tg-bridge
+Group=max-tg-bridge
+WorkingDirectory=/opt/max-tg-bridge
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/max-tg-bridge.env
+StateDirectory=max-tg-bridge
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/opt/max-tg-bridge/.venv/bin/python -m app
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
