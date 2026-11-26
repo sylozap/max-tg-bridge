@@ -154,11 +154,15 @@ class Bridge:
             if delivered:
                 log.info("delivery_completed", extra={**fields, "message_count": len(messages)})
 
-    def _content(self, messages: list[Message]) -> RichText:
+    def _content(self, messages: list[Message], reply: str | None) -> RichText:
         first = messages[0]
         name = " ".join(first.author.name.split())[:100] or "Неизвестный автор"
         title = self.settings.author_template.format(author=name, source=first.platform.title)
         result = RichText(title, (Span("bold", 0, len(title)),))
+        if first.reply and not reply:
+            quote = " ".join(first.reply.quote.split()) or "[сообщение недоступно]"
+            quote = "↪ " + (quote[:179] + "…" if len(quote) > 180 else quote)
+            result += RichText("\n") + RichText(quote, (Span("blockquote", 0, len(quote)),))
         if first.forwarded_from:
             sender = " ".join(first.forwarded_from.split())[:120]
             result += RichText(f"\nПереслано от {sender}")
@@ -169,19 +173,60 @@ class Bridge:
 
     async def _deliver(self, pair: Pair, messages: list[Message]) -> bool:
         first = messages[0]
-        if first.event not in {Event.CREATE, Event.SERVICE}:
-            return False
+        source = first.platform
         root = _root(first)
-        adapter = self.adapters[first.platform.opposite]
+        adapter = self.adapters[source.opposite]
         chat = pair.chat(adapter.platform)
-        existing = {copy.part for copy in await self.store.copies(pair, first.platform, root)}
+        existing = {copy.part: copy for copy in await self.store.copies(pair, source, root)}
+        if first.event == Event.DELETE:
+            return await self._delete(pair, source, root, adapter, chat, existing)
+        if first.event == Event.EDIT and not existing:
+            return False
+        reply = await self.store.reply_target(pair, source, first.reply.id) if first.reply and first.reply.id else None
         originals = [item.id for item in messages]
-        for i, part in enumerate(adapter.plan(self._content(messages), ())):
-            if i in existing:
-                continue
-            mid = await retry(lambda: adapter.send(chat, part, None))
-            await self.store.record_copy(pair, first.platform, root, originals, Copy(i, mid, part.mode))
+        parts = adapter.plan(self._content(messages, reply), ())
+        pos = 0
+        while pos < len(parts):
+            part = parts[pos]
+            old = existing.get(pos)
+            if old and first.event == Event.EDIT:
+                try:
+                    await retry(lambda: adapter.edit(chat, old.mid, part, old.mode))
+                except DeliveryError as exc:
+                    if not exc.missing:
+                        raise
+                    await self.store.forget_copy(pair, source, root, pos)
+                    old = None
+            if not old:
+                try:
+                    mid = await retry(lambda: adapter.send(chat, part, reply if pos == 0 else None))
+                except DeliveryError as exc:
+                    if not (exc.missing and reply and pos == 0):
+                        raise
+                    reply = None
+                    parts = adapter.plan(self._content(messages, reply), ())
+                    continue
+                await self.store.record_copy(pair, source, root, originals, Copy(pos, mid, part.mode))
+            pos += 1
+        if first.event == Event.EDIT:
+            surplus = {index: copy for index, copy in existing.items() if index >= len(parts)}
+            await self._delete(pair, source, root, adapter, chat, surplus)
         return True
+
+    async def _delete(
+        self, pair: Pair, source: Platform, root: str, adapter: Adapter, chat: int, existing: dict[int, Copy],
+    ) -> bool:
+        error = None
+        for copy in existing.values():
+            try:
+                await retry(lambda: adapter.delete(chat, copy.mid))
+            except DeliveryError as exc:
+                error = exc
+            else:
+                await self.store.forget_copy(pair, source, root, copy.part)
+        if error:
+            raise error
+        return bool(existing)
 
     async def close(self) -> None:
         tasks = [lane.task for lane in self.lanes.values()]

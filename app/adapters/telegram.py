@@ -172,7 +172,7 @@ class TelegramAdapter:
             description = exc.message.lower()
             if "message is not modified" in description:
                 return None
-            if "message to" in description and "not found" in description:
+            if "not found" in description and ("message to" in description or "reply message" in description):
                 raise DeliveryError("telegram_message_missing", missing=True) from None
             if not any(word in description for word in ("chat not found", "not enough rights", "can't parse entities")):
                 raise DeliveryError("telegram_rejected") from None
@@ -305,7 +305,7 @@ class TelegramAdapter:
 
     @staticmethod
     def _reply(mid: str | None) -> ReplyParameters | None:
-        return ReplyParameters(message_id=int(mid), allow_sending_without_reply=True) if mid else None
+        return ReplyParameters(message_id=int(mid), allow_sending_without_reply=False) if mid else None
 
     async def send(self, chat: int, part: Part, reply: str | None) -> str:
         from aiogram import methods
