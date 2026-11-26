@@ -1,6 +1,4 @@
-def main() -> None:
-    print("max-tg-bridge")
-
+from .main import main
 
 if __name__ == "__main__":
     main()
