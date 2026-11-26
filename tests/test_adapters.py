@@ -144,3 +144,15 @@ async def test_max_retry_after_and_untrusted_media_url(tmp_path):
             await adapter.download(Attachment("image", ref="https://127.0.0.1/test"), tmp_path, 15)
     finally:
         await adapter.close()
+
+
+async def test_max_nullable_marker_keeps_checkpoint():
+    adapter = MaxAdapter("placeholder", "https://platform-api2.max.ru")
+    await adapter.api.aclose()
+    adapter.api = httpx.AsyncClient(base_url="https://platform-api2.max.ru", transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, json={"marker": None, "updates": []}),
+    ))
+    try:
+        assert (await adapter.poll(123)).cursor == 123
+    finally:
+        await adapter.close()

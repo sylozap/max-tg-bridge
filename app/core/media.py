@@ -44,6 +44,9 @@ async def prepare(
         except MediaUnavailable as exc:
             notes += RichText(f"\n[{label} не передано: {exc}]")
             degraded = True
+        except OSError:
+            notes += RichText(f"\n[{label} не передано: ошибка записи временного файла]")
+            degraded = True
         except DeliveryError as exc:
             if exc.code in {"telegram_unauthorized", "max_unauthorized", "telegram_forbidden", "max_forbidden"}:
                 raise

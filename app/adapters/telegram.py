@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.core.model import Attachment, Author, Batch, Event, LocalFile, Message,
 from app.core.port import DeliveryError, MediaUnavailable
 from app.formatting.text import from_telegram, split_text, telegram_entities, utf16_length
 
+log = logging.getLogger(__name__)
 T = TypeVar("T")
 _MB = 1_000_000
 _ALLOWED = ["message", "edited_message", "channel_post", "edited_channel_post"]
@@ -226,8 +228,16 @@ class TelegramAdapter:
                             break
                     if start:
                         updates = updates[:start]
-        messages = tuple(m for update in updates if (m := normalize(update)) is not None)
-        return Batch(messages, updates[-1].update_id + 1)
+        messages = []
+        for update in updates:
+            try:
+                message = normalize(update)
+            except (AttributeError, TypeError, ValueError):
+                log.warning("invalid_telegram_update")
+                continue
+            if message is not None:
+                messages.append(message)
+        return Batch(tuple(messages), updates[-1].update_id + 1)
 
     async def download(self, attachment: Attachment, folder: Path, limit: int) -> LocalFile:
         limit = min(limit, 20 * _MB)

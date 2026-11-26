@@ -75,8 +75,8 @@ def _attachments(body: dict) -> tuple[Attachment, ...]:
                 result.append(Attachment("note", detail=f"[Контакт: {name}{identifier}, номер недоступен]"))
         elif kind == "share":
             url = payload.get("url")
-            if url:
-                result.append(Attachment("note", detail=f"[Ссылка] {url}"))
+            note = f"[Ссылка] {url}" if url else "[Ссылка MAX недоступна]"
+            result.append(Attachment("note", detail=note))
         elif kind == "inline_keyboard":
             result.append(Attachment("note", detail="[Кнопки MAX]"))
         else:
@@ -166,7 +166,10 @@ def _status(response: httpx.Response, data: dict | None = None, *, media: bool =
 
 
 def _cdn_url(value: str | httpx.URL) -> httpx.URL:
-    url = httpx.URL(value)
+    try:
+        url = httpx.URL(value)
+    except (httpx.InvalidURL, TypeError):
+        raise MediaUnavailable("некорректный URL вложения MAX") from None
     host = url.host.lower()
     if (url.scheme != "https" or url.port not in {None, 443} or url.userinfo
             or not any(host == domain or host.endswith("." + domain) for domain in _CDN_DOMAINS)):
@@ -264,7 +267,7 @@ class MaxAdapter:
             params["marker"] = cursor
         data = await self._call("GET", "/updates", params=params, timeout=40)
         marker = data.get("marker")
-        if not isinstance(data.get("updates"), list) or not isinstance(marker, int):
+        if not isinstance(data.get("updates"), list) or (marker is not None and type(marker) is not int):
             raise DeliveryError("max_invalid_poll_response", retry=True)
         messages = []
         for update in data["updates"]:
@@ -275,7 +278,7 @@ class MaxAdapter:
                 continue
             if message is not None:
                 messages.append(message)
-        return Batch(tuple(messages), marker)
+        return Batch(tuple(messages), cursor if marker is None else marker)
 
     async def _video_url(self, token: str) -> str | None:
         result = await self._call("GET", "/videos/" + quote(token, safe=""))

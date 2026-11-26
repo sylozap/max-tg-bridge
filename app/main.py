@@ -3,6 +3,7 @@ import asyncio
 import fcntl
 import logging
 import os
+import shutil
 import signal
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -38,7 +39,19 @@ def instance_lock(database: Path) -> Iterator[None]:
         yield
 
 
-async def _run(settings: Settings, stop: asyncio.Event) -> None:
+def _prepare_media_directory(database: Path) -> Path:
+    database = database.resolve()
+    directory = database.with_name(database.name + "-media")
+    if directory.is_symlink():
+        raise DeliveryError("invalid_media_directory")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    for child in directory.glob("max-tg-bridge-*"):
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+    return directory
+
+
+async def _run(settings: Settings, stop: asyncio.Event, media_directory: Path) -> None:
     telegram = TelegramAdapter(settings.telegram_token)
     adapters: dict[Platform, Adapter] = {Platform.TELEGRAM: telegram}
     try:
@@ -51,7 +64,7 @@ async def _run(settings: Settings, stop: asyncio.Event) -> None:
                 await until_stop(lambda: retry(adapter.identify), stop)
                 if stop.is_set():
                     return
-            bridge = Bridge(settings, store, adapters)
+            bridge = Bridge(settings, store, adapters, media_directory)
             bridge.command = Commands(bridge)
             for adapter in adapters.values():
                 try:
@@ -89,7 +102,8 @@ async def run(settings: Settings) -> None:
         loop.add_signal_handler(sig, stop.set)
     try:
         with instance_lock(settings.database):
-            await _run(settings, stop)
+            media_directory = await asyncio.to_thread(_prepare_media_directory, settings.database)
+            await _run(settings, stop, media_directory)
     finally:
         for sig in signals:
             loop.remove_signal_handler(sig)

@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS cursors (
     platform TEXT NOT NULL,
     bot INTEGER NOT NULL,
     cursor INTEGER NOT NULL,
-    saved_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    saved_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER)),
     PRIMARY KEY (platform, bot)
 );
 CREATE TABLE IF NOT EXISTS receipts (

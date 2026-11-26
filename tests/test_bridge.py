@@ -261,3 +261,12 @@ async def test_cursor_saved_after_delivery_and_recovers_after_reopen(tmp_path: P
     async with Store.open(db_path) as store:
         assert await store.cursor(TG, adapters[TG].bot_id) == 204
         assert await store.seen(msg(66, content))
+
+
+async def test_idle_telegram_offset_is_reset_but_max_marker_is_kept(setup_bridge):
+    _, store, adapters = setup_bridge
+    for platform in Platform:
+        await store.save_cursor(platform, adapters[platform].bot_id, 123)
+    await store.db.execute("UPDATE cursors SET saved_at = saved_at - 604800")
+    assert await store.cursor(TG, adapters[TG].bot_id) is None
+    assert await store.cursor(MAX, adapters[MAX].bot_id) == 123

@@ -28,8 +28,8 @@ async def until_stop(operation: Callable[[], Awaitable[T]], stop: asyncio.Event)
 
 
 async def poll(adapter: Adapter, bridge: Bridge, stop: asyncio.Event) -> None:
-    cursor = await bridge.store.cursor(adapter.platform, adapter.bot_id)
     while not stop.is_set():
+        cursor = await bridge.store.cursor(adapter.platform, adapter.bot_id)
         try:
             batch = await until_stop(lambda: retry(lambda: adapter.poll(cursor)), stop)
         except DeliveryError as exc:
@@ -46,4 +46,3 @@ async def poll(adapter: Adapter, bridge: Bridge, stop: asyncio.Event) -> None:
         await bridge.handle_batch(batch.messages)
         if batch.cursor is not None and batch.cursor != cursor:
             await bridge.store.save_cursor(adapter.platform, adapter.bot_id, batch.cursor)
-            cursor = batch.cursor

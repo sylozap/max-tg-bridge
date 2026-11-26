@@ -136,9 +136,14 @@ class Store:
 
     async def cursor(self, platform: Platform, bot: int) -> int | None:
         row = await self._one(
-            "SELECT cursor, saved_at FROM cursors WHERE platform = ? AND bot = ?", (platform, bot)
+            "SELECT cursor, CAST(strftime('%s', 'now') AS INTEGER) - saved_at AS age "
+            "FROM cursors WHERE platform = ? AND bot = ?",
+            (platform, bot)
         )
-        return row["cursor"] if row else None
+        # Telegram can choose a new, lower update_id after one idle week.
+        if row is None or (platform == Platform.TELEGRAM and row["age"] >= 6 * 86400):
+            return None
+        return row["cursor"]
 
     async def save_cursor(self, platform: Platform, bot: int, cursor: int) -> None:
         async with self._write() as db:

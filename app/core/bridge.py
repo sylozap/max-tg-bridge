@@ -42,12 +42,16 @@ def _root(message: Message) -> str:
 
 
 class Bridge:
-    def __init__(self, settings: Settings, store: Store, adapters: dict[Platform, Adapter]):
+    def __init__(
+        self, settings: Settings, store: Store, adapters: dict[Platform, Adapter],
+        media_directory: Path | None = None,
+    ):
         self.settings = settings
         self.store = store
         self.adapters = adapters
         self.command: Handler | None = None
         self.poll_errors: dict[Platform, str] = {}
+        self.media_directory = media_directory
         self.media_slots = asyncio.Semaphore(4)
         self.lanes: dict[tuple[int, Platform], _Lane] = {}
 
@@ -244,7 +248,9 @@ class Bridge:
             media, notes, degraded = [], RichText(), False
             if not keep_media and any(message.attachments for message in messages):
                 await stack.enter_async_context(self.media_slots)
-                folder = Path(stack.enter_context(TemporaryDirectory(prefix="max-tg-bridge-")))
+                folder = Path(stack.enter_context(
+                    TemporaryDirectory(prefix="max-tg-bridge-", dir=self.media_directory)
+                ))
                 media, notes, degraded = await prepare(messages, self.adapters[source], target, folder)
 
             def plan(reply_to: str | None) -> list[Part]:
@@ -257,6 +263,8 @@ class Bridge:
             parts = plan(reply)
             pos = 0
             while pos < len(parts):
+                if not await self._current(pair):
+                    return False, None
                 part = parts[pos]
                 old = existing.get(pos)
                 if old and editing:
@@ -290,6 +298,10 @@ class Bridge:
                 await self._delete(pair, source, root, target, chat, surplus)
                 await self.store.update_original(pair, first)
         return True, "media_fallback" if degraded else None
+
+    async def _current(self, original: Pair) -> bool:
+        pair = await self.store.pair(original.id)
+        return pair is not None and not pair.paused and pair.generation == original.generation
 
     @staticmethod
     async def _send(target: Adapter, chat: int, part: Part, reply: str | None) -> tuple[str, str]:

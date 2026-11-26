@@ -106,9 +106,9 @@ def neutralize_mentions(content: RichText) -> RichText:
 
 
 def _compatible(spans: Iterable[Span]) -> list[Span]:
-    def priority(span: Span) -> tuple[int, int, int]:
+    def priority(span: Span) -> tuple[int, int, int, str]:
         group = 0 if span.kind in _CODE else 1 if span.kind.endswith("blockquote") else 2
-        return group, span.start, -span.end
+        return group, span.start, -span.end, span.kind
 
     accepted: list[Span] = []
     for span in sorted(set(spans), key=priority):
