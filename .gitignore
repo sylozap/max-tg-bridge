@@ -20,3 +20,6 @@ venv/
 *.swp
 data/
 certs/
+.agents/
+.aws/
+.codex/
